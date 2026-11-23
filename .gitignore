@@ -1,0 +1,24 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+runs/
+workspace/reports/
+
+# Личные материалы курса и реальные проекты не публикуются.
+/my_real_scholar_work/
+/Транскрипция*.txt
+/презентация*.pptx
+
+# Локальные настройки среды разработки.
+.idea/
+.vscode/
+.pytest_cache/
+venv/
+/.codex/
+/.agents/
