@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
 import stat
 import sys
@@ -13,9 +15,11 @@ from .agent import AgentRunner
 from .config import ConfigError, load_env, positive_int
 from .events import EventLog
 from .providers import DemoModel, LocalChatModel, ModelError
+from .planner import ModelPlanner, PlanningError
 from .skills import SkillError, SkillRegistry
 from .skill_tools import SkillToolSet
 from .tools import FileTools
+from .workflows import WorkflowError, WorkflowRunner, project_comparison_plan, validate_project_roots
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,15 +49,19 @@ def parser() -> argparse.ArgumentParser:
                        help="Явно выбрать скилл project-review (прежняя команда обзора)")
     modes.add_argument("--skill", metavar="NAME", help="Явно выбрать скилл по имени")
     modes.add_argument("--list-skills", action="store_true", help="Показать скиллы без модели и сети")
-    result.add_argument("--project", type=Path, default=ROOT / "workspace" / "project",
-                        help="Корень разрешённых документов и исходников для поручения")
+    modes.add_argument("--compare-projects", action="store_true",
+                       help="Обзоры 2–4 проектов, затем сравнение; повторите --project для каждой папки")
+    modes.add_argument("--auto-plan", action="store_true",
+                       help="Построить план по поручению и выполнить его в разрешённых папках")
+    result.add_argument("--project", type=Path, action="append",
+                        help="Разрешённая папка; для --auto-plan и --compare-projects можно повторять")
     result.add_argument("--source", default="README.md", help="Исходный файл для стандартного поручения")
     result.add_argument("--env-file", type=Path, default=ROOT / ".env", help="Файл настроек")
     result.add_argument("--base-url", help="Локальный адрес API, включая /v1")
     result.add_argument("--model", help="Точное имя модели из локального API")
-    result.add_argument("--max-steps", help="Максимум запросов к модели (по умолчанию 8)")
-    result.add_argument("--max-tool-calls", help="Максимум вызовов инструментов (по умолчанию 8)")
-    result.add_argument("--read-budget", help="Общий бюджет чтения для скиллов, байты (по умолчанию 16384)")
+    result.add_argument("--max-steps", help="Максимум запросов к модели на этап (по умолчанию 8)")
+    result.add_argument("--max-tool-calls", help="Максимум вызовов инструментов на этап (по умолчанию 8)")
+    result.add_argument("--read-budget", help="Бюджет чтения исходников на этап, байты (по умолчанию 16384)")
     result.add_argument("--timeout", help="Таймаут HTTP-запроса в секундах (по умолчанию 60)")
     return result
 
@@ -63,12 +71,20 @@ def main(argv: list[str] | None = None) -> int:
     args = arg_parser.parse_args(argv)
     if args.task and (args.demo or args.check or args.list_skills):
         arg_parser.error("Поручение задаётся только в режиме настоящей модели.")
+    if args.auto_plan and not args.task:
+        arg_parser.error("Для --auto-plan напишите поручение в кавычках.")
+    projects = args.project or [ROOT / "workspace" / "project"]
+    if len(projects) > 1 and not (args.compare_projects or args.auto_plan):
+        arg_parser.error("Несколько --project поддерживаются с --compare-projects или --auto-plan.")
     log = None
     try:
         if args.list_skills:
             for skill in SkillRegistry().list_skills():
                 print(f"{skill.name}: {skill.description}")
             return 0
+        plan = project_comparison_plan(projects, args.task or "") if args.compare_projects else None
+        if args.auto_plan:
+            projects = list(validate_project_roots(projects))
         skill_mode = bool(args.task or args.skill or args.describe_project)
         config = load_env(args.env_file)
         secret = config.get("ASSISTANT_API_KEY", "")
@@ -117,11 +133,72 @@ def main(argv: list[str] | None = None) -> int:
         _directory(logs_dir)
         report_path = report_dir / "report.md"
         log_path = logs_dir / f"{run_id}.jsonl"
-        files = FileTools(args.project, report_path,
+        log = EventLog(log_path, secrets=[secret] if secret else [])
+        planning_requests = 0
+        registry = None
+        if args.auto_plan:
+            registry = SkillRegistry()
+            print("Планирование той же локальной моделью. Разрешённые папки:")
+            for index, project in enumerate(projects, 1):
+                print(f"  project-{index}: {project}")
+            proposed = ModelPlanner(model, registry, log).plan(args.task, projects)
+            planning_requests = proposed.requests
+            print(f"Запросов к модели на планирование: {planning_requests}.")
+            if proposed.status != "ready":
+                print(proposed.message)
+                print(f"Всего запросов к модели: {planning_requests}; вызовов инструментов: 0.")
+                print(f"Журнал: {log_path}")
+                return 1
+            plan = list(proposed.steps)
+            aliases = {os.path.normcase(str(project)): f"project-{index}"
+                       for index, project in enumerate(projects, 1)}
+            plan_data = {"projects": [{"alias": f"project-{index}", "name": project.name}
+                                       for index, project in enumerate(projects, 1)], "steps": []}
+            print("Проверенный план модели:")
+            for step in plan:
+                source = aliases[os.path.normcase(str(step.project_dir))] if step.project_dir else None
+                plan_data["steps"].append({"id": step.step_id, "skill": step.skill, "task": step.task,
+                                          "project": source, "depends_on": list(step.depends_on)})
+                print(f"  {step.step_id}: {step.skill}; входы: "
+                      + (source if source else ", ".join(step.depends_on)))
+            plan_path = report_dir / "plan.json"
+            with plan_path.open("x", encoding="utf-8") as stream:
+                json.dump(plan_data, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+            print(f"План сохранён: {plan_path}")
+        if plan is not None:
+            if not args.auto_plan:
+                print("План: отдельный обзор каждого проекта, затем сравнение обзоров.")
+            for step in plan:
+                if step.project_dir is not None:
+                    print(f"  {step.step_id}: {step.project_dir}")
+            outcome = WorkflowRunner(model, registry or SkillRegistry(), log, report_dir, max_steps=max_steps,
+                                     max_tool_calls=max_calls, read_budget=read_budget,
+                                     on_event=print).run(plan)
+            print("\n" + outcome.final_text)
+            print(f"Всего запросов к модели: {outcome.steps + planning_requests}; "
+                  f"вызовов инструментов: {outcome.tool_calls}.")
+            if args.auto_plan:
+                print(f"Из них планирование: {planning_requests}; выполнение этапов: {outcome.steps}.")
+            print(f"Журнал: {log_path}")
+            for stage in outcome.stages:
+                print(f"Этап {stage.step_id}: {stage.result.status}")
+                if stage.report_path is not None:
+                    print(f"  Отчёт: {stage.report_path}")
+            if outcome.status == "completed":
+                if args.auto_plan:
+                    dependencies = {dep for step in plan for dep in step.depends_on}
+                    print("Итоговые отчёты:")
+                    for stage in outcome.stages:
+                        if stage.step_id not in dependencies:
+                            print("  " + str(stage.report_path))
+                else:
+                    print("Итоговое сравнение: " + str(outcome.stages[-1].report_path))
+            return 0 if outcome.status == "completed" else 1
+        files = FileTools(projects[0], report_path,
                           required_source=args.source if not skill_mode else None,
                           project_mode=skill_mode,
                           max_total_read_bytes=read_budget)
-        log = EventLog(log_path, secrets=[secret] if secret else [])
         skill_tools = None
         if skill_mode:
             selected = "project-review" if args.describe_project else args.skill
@@ -156,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Отчёт не создан: поручение ещё не выполнено; возможно, требуется уточнение входных данных.")
             return 1
         return 0 if result.status == "completed" else 1
-    except (ConfigError, ModelError, SkillError) as exc:
+    except (ConfigError, ModelError, SkillError, WorkflowError, PlanningError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

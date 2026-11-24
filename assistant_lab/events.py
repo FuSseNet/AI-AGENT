@@ -14,7 +14,7 @@ from typing import Iterable
 _METADATA_FIELDS = frozenset(
     {
         "status", "step", "steps", "tool", "tool_name", "tool_calls", "ok",
-        "bytes", "count", "input_bytes", "output_bytes", "duration_ms", "metadata", "skill",
+        "bytes", "count", "input_bytes", "output_bytes", "duration_ms", "metadata", "skill", "stage",
     }
 )
 _EVENT_NAME = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
