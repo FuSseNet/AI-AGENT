@@ -183,7 +183,7 @@ class ModelPlanner:
             roots = validate_project_roots(projects, min_count=1)
         except WorkflowError:
             raise PlanningError("Укажите от 1 до 4 разных существующих папок без ссылок.") from None
-        catalog = self.registry.list_skills()
+        catalog = self.registry.report_skills()
         aliases = {f"project-{number}": root for number, root in enumerate(roots, 1)}
         context = {
             "owner_goal": task,

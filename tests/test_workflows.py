@@ -69,6 +69,7 @@ class WorkflowTests(unittest.TestCase):
         self.library.mkdir()
         self.make_skill("project-review", "Описать проект.", "REVIEW_SKILL_BODY_MARKER")
         self.make_skill("compare-documents", "Сравнить документы.", "COMPARE_SKILL_BODY_MARKER")
+        self.make_skill("manage-tasks", "Управление поручениями.", "QUEUE_SKILL_BODY_MARKER")
         self.registry = SkillRegistry(self.library)
         self.output = self.root / "output"
         self.output.mkdir()
@@ -132,8 +133,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(snapshot["messages"]), 2)
             self.assertEqual([message["role"] for message in snapshot["messages"]], ["system", "user"])
             self.assertIn(marker, snapshot["messages"][0]["content"])
-            self.assertEqual({tool["function"]["name"] for tool in snapshot["tools"]},
-                             {"list_files", "read_file", "save_report"})
+            expected_tools = {"list_files", "read_file", "save_report"}
+            if marker == "REVIEW_SKILL_BODY_MARKER":
+                expected_tools.add("search_text")
+            self.assertEqual({tool["function"]["name"] for tool in snapshot["tools"]}, expected_tools)
             first_request = json.dumps(snapshot, ensure_ascii=False)
             self.assertNotIn("A_SOURCE_PAYLOAD_MARKER", first_request)
             self.assertNotIn("B_SOURCE_PAYLOAD_MARKER", first_request)
@@ -231,6 +234,7 @@ class WorkflowTests(unittest.TestCase):
             [WorkflowStep("credentials", "project-review", "Описание.", self.project_a)],
             [WorkflowStep("a" * 33, "project-review", "Описание.", self.project_a)],
             [WorkflowStep("source", "missing-skill", "Описание.", self.project_a)],
+            [WorkflowStep("source", "manage-tasks", "Покажи очередь.", self.project_a)],
             [WorkflowStep("source", "project-review", " \t", self.project_a)],
             [WorkflowStep("source", "project-review", "Описание.", self.root / "missing")],
             [WorkflowStep("source", "project-review", "Описание.", self.project_a / "README.md")],

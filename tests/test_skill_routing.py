@@ -133,7 +133,7 @@ class SkillRoutingTests(unittest.TestCase):
         self.assertIn(self.REVIEW_BODY, loaded["instructions"])
         self.assertEqual(self.tools.selected_name, self.REVIEW_NAME)
         self.assertEqual(self.definition_names(self.tools.definitions), {
-            "list_files", "read_file", "save_report",
+            "list_files", "read_file", "search_text", "save_report",
         })
         # Automatic activation returns its body as a tool result. It does not
         # retroactively replace the system message already sent to the model.
@@ -144,6 +144,7 @@ class SkillRoutingTests(unittest.TestCase):
     def test_file_operations_cannot_run_before_activation(self):
         for name, arguments in (
             ("list_files", {}),
+            ("search_text", {"query": "first"}),
             ("read_file", {"path": "first.md"}),
             ("save_report", {"content": "Pretend report"}),
         ):
@@ -176,7 +177,8 @@ class SkillRoutingTests(unittest.TestCase):
         self.assertIn(SYSTEM_PROMPT, tools.system_prompt)
         self.assertIn(self.COMPARISON_BODY, tools.system_prompt)
         self.assertNotIn(self.REVIEW_BODY, tools.system_prompt)
-        self.assertEqual(self.definition_names(tools.definitions), self.definition_names(files.definitions))
+        self.assertEqual(self.definition_names(tools.definitions), {"list_files", "read_file", "save_report"})
+        self.assert_rejected("search_text", {"query": "second"}, tools=tools)
         self.assert_rejected("load_skill", {"name": self.REVIEW_NAME}, tools=tools)
         self.assertEqual(tools.selected_name, self.COMPARISON_NAME)
 
@@ -211,9 +213,10 @@ class SkillRoutingTests(unittest.TestCase):
                 self.assertIs(files.report_saved, True)
                 self.assertEqual(self.definition_names(model.observed[0]["tools"]), {"load_skill"})
                 for snapshot in model.observed[1:]:
-                    self.assertEqual(self.definition_names(snapshot["tools"]), {
-                        "list_files", "read_file", "save_report",
-                    })
+                    expected = {"list_files", "read_file", "save_report"}
+                    if selected == self.REVIEW_NAME:
+                        expected.add("search_text")
+                    self.assertEqual(self.definition_names(snapshot["tools"]), expected)
                 self.assertEqual(model.observed[0]["messages"][1]["content"], goal)
                 initial_request = json.dumps(model.observed[0], ensure_ascii=False)
                 self.assertNotIn(instructions, initial_request)
@@ -287,7 +290,7 @@ class SkillRoutingTests(unittest.TestCase):
         self.assertIs(prior_results["too_early"]["ok"], False)
         self.assertEqual(prior_results["too_early"]["error"], "unknown_tool")
         self.assertEqual(self.definition_names(next_request["tools"]), {
-            "list_files", "read_file", "save_report",
+            "list_files", "read_file", "search_text", "save_report",
         })
         # Exactly one successful read, made after the next tool catalog was sent.
         self.assertEqual(len(files.read_ranges), 1)

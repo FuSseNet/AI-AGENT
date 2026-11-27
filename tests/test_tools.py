@@ -268,7 +268,7 @@ class ProjectModeTests(unittest.TestCase):
 
     def test_project_schema_and_optional_argument_validation(self):
         definitions = {item["function"]["name"]: item["function"] for item in self.tools.definitions}
-        self.assertEqual(set(definitions), {"read_file", "save_report", "list_files"})
+        self.assertEqual(set(definitions), {"read_file", "save_report", "list_files", "search_text"})
         parameters = definitions["list_files"]["parameters"]
         self.assertEqual(set(parameters["properties"]), {"path", "offset", "limit"})
         self.assertEqual(parameters["required"], [])

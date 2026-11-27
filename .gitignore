@@ -9,6 +9,9 @@ build/
 dist/
 runs/
 workspace/reports/
+workspace/idle-demo/
+workspace/.assistant/
+study_planner/views/.staging-*/
 
 # Личные материалы курса и реальные проекты не публикуются.
 /my_real_scholar_work/

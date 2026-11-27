@@ -111,6 +111,7 @@ class PlannerCliTests(unittest.TestCase):
         text = "\n".join(item["content"] for item in request["messages"])
         self.assertIn("project-review", text)
         self.assertIn("compare-materials", text)
+        self.assertNotIn("manage-tasks", text)
         for index, project in enumerate(projects, 1):
             self.assertIn(f"project-{index}", text)
             self.assertIn(project.name, text)
@@ -118,10 +119,12 @@ class PlannerCliTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_SOURCE_", text)
         self.assertNotIn("PRIVATE_DEFAULT_SOURCE", text)
 
-    def assert_fresh_execution(self, request, planning_response):
+    def assert_fresh_execution(self, request, planning_response, *, review=True):
         self.assertEqual([item["role"] for item in request["messages"]], ["system", "user"])
-        self.assertEqual({tool["function"]["name"] for tool in request["tools"]},
-                         {"list_files", "read_file", "save_report"})
+        expected_tools = {"list_files", "read_file", "save_report"}
+        if review:
+            expected_tools.add("search_text")
+        self.assertEqual({tool["function"]["name"] for tool in request["tools"]}, expected_tools)
         self.assertNotIn(planning_response["content"],
                          "\n".join(item["content"] for item in request["messages"]))
 
@@ -145,8 +148,9 @@ class PlannerCliTests(unittest.TestCase):
         self.assertIn("Запросов к модели на планирование: 1.", output)
         self.assertIn("Всего запросов к модели: 14; вызовов инструментов: 10.", output)
         self.assert_planning_request(requests[0], self.projects)
-        for first_request in (1, 5, 9):
+        for first_request in (1, 5):
             self.assert_fresh_execution(requests[first_request], planned)
+        self.assert_fresh_execution(requests[9], planned, review=False)
         run_dir = self.run_dir()
         saved_plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
         self.assertEqual([step["id"] for step in saved_plan["steps"]], ["step-1", "step-2", "step-3"])

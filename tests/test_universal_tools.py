@@ -462,6 +462,55 @@ class UniversalProjectToolsTests(unittest.TestCase):
         self.assertIs(tools.execute("read_file", {"path": "notes.txt", "start_line": 1})["ok"], False)
         self.assertIs(tools.execute("read_file", {"path": "main.py"})["ok"], False)
         self.assertIs(tools.execute("list_files", {})["ok"], False)
+        self.assertIs(tools.execute("search_text", {"query": "example"})["ok"], False)
+
+    def test_search_locations_can_be_read_with_the_same_line_numbers(self):
+        for name, encoding in [("src/a", "utf-16"), ("src/b", "utf-32")]:
+            self.write(name, "lower\rX[1] X[1]\r\nabc\fpart\u2028X[1]\n", encoding=encoding)
+        self.write("other.md", "X[1]")
+        result = self.assert_ok("search_text", {"query": "X[1]", "path": "src"})
+        self.assertEqual(result["matches"], [{"path": path, "line": line}
+                                             for path in ("src/a", "src/b") for line in (2, 3)])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(self.tools.remaining_read_bytes, 16384)
+        self.assertEqual(self.tools.read_ranges, [])
+        self.assert_ok("list_files", {})
+        self.assert_rejected("save_report", {"content": "Ещё не читали."})
+        for hit in result["matches"]:
+            read = self.assert_ok("read_file", {"path": hit["path"], "start_line": hit["line"], "max_lines": 1})
+            self.assertIn("X[1]", read["content"])
+        self.assertEqual(self.assert_ok("search_text", {"query": "x[1]"})["matches"], [])
+
+    def test_search_reports_limits_and_skipped_files(self):
+        self.write("a.txt", "abc\nabc")
+        self.write("b.txt", "abc")
+        exact = self.assert_ok("search_text", {"query": "abc", "path": "a.txt", "limit": 2})
+        self.assertFalse(exact["truncated"])
+        limited = self.assert_ok("search_text", {"query": "abc", "limit": 2})
+        self.assertTrue(limited["truncated"])
+        self.assertEqual(limited["matches"], exact["matches"])
+        for field, maximum in [("_MAX_SEARCH_BYTES", 7), ("_MAX_SEARCH_FILES", 1),
+                               ("_MAX_SCANNED", 1)]:
+            with self.subTest(field=field), patch.object(self.tools, field, maximum):
+                limited = self.assert_ok("search_text", {"query": "absent"})
+                self.assertTrue(limited["truncated"])
+                self.assertEqual(limited["files_searched"], 1)
+        self.write("bad.md", "abc\x00")
+        partial = self.assert_ok("search_text", {"query": "abc"})
+        self.assertEqual(partial["files_skipped"], 1)
+        self.assertTrue(partial["truncated"])
+        self.assert_rejected("search_text", {"path": "bad.md", "query": "abc"})
+
+    def test_search_uses_the_same_file_policy_and_checks_arguments(self):
+        for path in (".env", ".git/config", "build/main.py", "credentials.json", "img.png"):
+            self.write(path, "needle")
+            self.assert_rejected("search_text", {"query": "needle", "path": path})
+        self.assertEqual(self.assert_ok("search_text", {"query": "needle"})["matches"], [])
+        for args in ({}, {"query": " "}, {"query": "x\ny"}, {"query": "a" * 257},
+                     {"query": False}, {"query": "a", "limit": True}, {"query": "a", "limit": 31},
+                     {"query": "a", "path": ".."}, {"query": "a", "regex": True}):
+            with self.subTest(args=args):
+                self.assert_rejected("search_text", args)
 
 
 if __name__ == "__main__":

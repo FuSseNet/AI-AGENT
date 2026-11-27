@@ -106,21 +106,22 @@ class LocalChatModel:
 class DemoModel:
     """Сценарная имитация: реальные инструменты, но без нейросети и сети."""
 
-    def __init__(self, source: str = "README.md"):
+    def __init__(self, source: str = "README.md", *, search_query: str | None = None):
         self.source = source
-        self.stage = 0
+        self.search_query = search_query
 
     @staticmethod
-    def _call(call_id: str, name: str, **arguments) -> dict:
+    def _call(call_id: str, tool_name: str, **arguments) -> dict:
         return {"role": "assistant", "content": None, "tool_calls": [{
             "id": call_id, "type": "function", "function": {
-                "name": name, "arguments": json.dumps(arguments, ensure_ascii=False)
+                "name": tool_name, "arguments": json.dumps(arguments, ensure_ascii=False)
             }
         }]}
 
     def complete(self, messages: list[dict], tools: list[dict]) -> dict:
-        self.stage += 1
-        if self.stage == 1:
+        if messages[-1]["role"] != "tool":
+            if self.search_query is not None:
+                return self._call("demo_list", "list_files", limit=10)
             return self._call("demo_read", "read_file", path=self.source)
         try:
             result = json.loads(messages[-1]["content"])
@@ -129,7 +130,26 @@ class DemoModel:
         if not result.get("ok"):
             return {"role": "assistant", "content": "Поручение не выполнено: "
                     + result.get("error", "инструмент сообщил об ошибке.")}
-        if self.stage == 2:
+        previous = messages[-1]["tool_call_id"]
+        if previous == "demo_list":
+            return self._call("demo_search", "search_text", query=self.search_query)
+        if previous == "demo_search":
+            if not result["matches"]:
+                message = "Совпадений в просмотренной части проекта не найдено."
+                if result["truncated"]:
+                    message += " Поиск был ограничен."
+                return {"role": "assistant", "content": message}
+            hit = result["matches"][0]
+            return self._call("demo_read", "read_file", path=hit["path"], start_line=hit["line"], max_lines=1)
+        if previous == "demo_read":
+            if self.search_query is not None:
+                if self.search_query not in result["content"]:
+                    return {"role": "assistant", "content": "При повторном чтении совпадение не подтвердилось."}
+                line = result["content"].rstrip("\r\n")
+                report = ("# Первое подтверждённое совпадение\n\n"
+                          "Сценарное демо. MCP-поиск указал строку, прочитанную ниже.\n\n"
+                          f"> {line}\n")
+                return self._call("demo_save", "save_report", content=report)
             excerpt = result["content"][:3000]
             quoted = "\n".join("> " + line for line in excerpt.splitlines())
             report = ("# Учебный отчёт\n\n"
@@ -137,6 +157,10 @@ class DemoModel:
                       "Ниже извлечён фрагмент исходного документа; это не ИИ-анализ.\n\n"
                       f"Источник: `{self.source}`\n\n{quoted}\n")
             return self._call("demo_save", "save_report", content=report)
+        if previous != "demo_save":
+            raise ModelError("Неожиданный шаг демонстрационного сценария.")
+        if self.search_query is not None:
+            return {"role": "assistant", "content": "Демо завершено. Совпадение проверено, отчёт сохранён."}
         return {"role": "assistant", "content":
                 "Демо завершено: файл прочитан, учебный отчёт сохранён. "
                 "Оба действия выполнены настоящими файловыми инструментами."}

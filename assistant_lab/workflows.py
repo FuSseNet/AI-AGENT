@@ -108,7 +108,7 @@ class WorkflowRunner:
     def _validate(self, steps: list[WorkflowStep]) -> None:
         if not isinstance(steps, (list, tuple)) or not 1 <= len(steps) <= _MAX_STAGES:
             raise WorkflowError("План должен содержать от 1 до 8 этапов.")
-        known_skills = {item.name for item in self.registry.list_skills()}
+        known_skills = {item.name for item in self.registry.report_skills()}
         previous: set[str] = set()
         _directory(self.output_dir)
         for step in steps:

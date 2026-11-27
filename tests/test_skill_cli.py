@@ -61,7 +61,7 @@ class SkillCliTests(unittest.TestCase):
         self.assertIn("Выбранный скилл: project-review", output)
         self.assertEqual({tool["function"]["name"] for tool in requests[0]["tools"]}, {"load_skill"})
         self.assertEqual({tool["function"]["name"] for tool in requests[1]["tools"]},
-                         {"list_files", "read_file", "save_report"})
+                         {"list_files", "read_file", "search_text", "save_report"})
         for request in requests[1:]:
             self.assertTrue(json.loads(request["messages"][-1]["content"])["ok"])
         self.assertTrue(list(self.root.glob("workspace/reports/*/report.md")))
@@ -107,6 +107,25 @@ class SkillCliTests(unittest.TestCase):
         ])
         self.assertEqual(code, 1)
         self.assertIn("Выбранный скилл: не выбран", output)
+        self.assertFalse(list(self.root.glob("workspace/reports/*/report.md")))
+
+    def test_offline_search_demo_confirms_a_hit_before_writing_the_report(self):
+        code, output, _ = self.run_script(["--demo-search", "CSV"], [])
+        self.assertEqual(code, 0, output)
+        report = next(self.root.glob("workspace/reports/*/report.md")).read_text(encoding="utf-8")
+        self.assertIn("> Export CSV.", report)
+        self.assertIn("`new.md`: строки 2–2", report)
+        self.assertNotIn("Store tasks", report)
+        log = next(self.root.glob("runs/*.jsonl")).read_text(encoding="utf-8")
+        calls = [event["tool"] for event in map(json.loads, log.splitlines())
+                 if event["event"] == "tool_finished" and event["ok"]]
+        self.assertEqual(calls, ["list_files", "search_text", "read_file", "save_report"])
+        self.assertNotIn("CSV", log)
+
+    def test_offline_search_demo_miss_does_not_create_report(self):
+        code, output, _ = self.run_script(["--demo-search", "absent"], [])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Совпадений", output)
         self.assertFalse(list(self.root.glob("workspace/reports/*/report.md")))
 
     def test_list_skills_does_not_read_env_or_call_api(self):

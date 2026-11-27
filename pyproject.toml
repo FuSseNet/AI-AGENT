@@ -10,7 +10,8 @@ requires-python = ">=3.11"
 dependencies = []
 
 [tool.setuptools.packages.find]
-include = ["assistant_lab*"]
+include = ["assistant_lab*", "study_planner*"]
 
 [tool.setuptools.package-data]
 assistant_lab = ["skill_library/*/SKILL.md"]
+study_planner = ["views/*/view.json", "views/*/report.md"]

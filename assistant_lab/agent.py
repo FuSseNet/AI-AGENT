@@ -52,6 +52,7 @@ class AgentRunner:
         max_tool_calls: int = 8,
         on_event: Callable[[str], None] | None = None,
         system_prompt: str | None = None,
+        should_yield: Callable[[], bool] | None = None,
     ) -> None:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps должен быть положительным целым числом")
@@ -63,6 +64,7 @@ class AgentRunner:
         self.max_steps = max_steps
         self.max_tool_calls = max_tool_calls
         self.on_event = on_event
+        self.should_yield = should_yield
         self.system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
         if not isinstance(self.system_prompt, str) or not self.system_prompt.strip():
             raise ValueError("Системная инструкция не должна быть пустой.")
@@ -146,6 +148,8 @@ class AgentRunner:
         used_ids: set[str] = set()
 
         while steps < self.max_steps:
+            if self.should_yield is not None and self.should_yield():
+                return finish("yielded", "Цикл отложен для работы владельца.")
             # Набор операций может измениться после загрузки скилла. Модель
             # может запросить лишь инструменты, описанные в этом обращении.
             definitions = self.tools.definitions
@@ -200,7 +204,9 @@ class AgentRunner:
                         result = self._error("unknown_tool", "Такой инструмент недоступен.")
                     else:
                         lowered_name = name.lower()
-                        if "read" in lowered_name:
+                        if name == "search_text":
+                            self._notify("Ищу текст в проекте через MCP…")
+                        elif "read" in lowered_name:
                             self._notify("Читаю файл…")
                         elif any(part in lowered_name for part in ("write", "save")):
                             self._notify("Сохраняю файл…")

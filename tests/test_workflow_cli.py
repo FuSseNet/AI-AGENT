@@ -80,9 +80,11 @@ class WorkflowCliTests(unittest.TestCase):
             data = json.loads(request.data)
             requests.append(data)
             self.assertEqual(data["model"], "workflow-test")
+            expected_tools = {"list_files", "read_file", "save_report"}
+            if action["stage"] != "comparison":
+                expected_tools.add("search_text")
             self.assertEqual(
-                {tool["function"]["name"] for tool in data["tools"]},
-                {"list_files", "read_file", "save_report"},
+                {tool["function"]["name"] for tool in data["tools"]}, expected_tools,
                 "Workflow skills must be preloaded without a load_skill request",
             )
             skill = "compare-materials" if action["stage"] == "comparison" else "project-review"

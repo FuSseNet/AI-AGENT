@@ -146,6 +146,9 @@ class SkillRegistry:
     def list_skills(self) -> list[SkillMetadata]:
         return [self._skills[name].metadata for name in sorted(self._skills)]
 
+    def report_skills(self) -> list[SkillMetadata]:
+        return [item for item in self.list_skills() if item.name != "manage-tasks"]
+
     def load(self, name: str) -> Skill:
         if not _valid_name(name) or name not in self._skills:
             raise SkillError("Навык не найден в контролируемой библиотеке.")

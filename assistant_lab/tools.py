@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from io import StringIO
 import os
 from pathlib import Path, PureWindowsPath
-import re
 import stat
 from typing import Any
 
@@ -22,11 +22,14 @@ class FileTools:
     _MAX_SCANNED = 2000
     _MAX_DEPTH = 20
     _MAX_SOURCE_BYTES = 2 * 1024 * 1024
+    _MAX_SEARCH_FILES = 32
+    _MAX_SEARCH_BYTES = 4 * 1024 * 1024
+    _MAX_MATCHES = 30
 
     def __init__(
         self,
         project_dir: Path,
-        report_path: Path,
+        report_path: Path | None,
         max_file_bytes: int = 65536,
         required_source: str | None = None,
         project_mode: bool = False,
@@ -40,7 +43,7 @@ class FileTools:
             raise ValueError("project_mode должен быть логическим значением.")
         # resolve() здесь скрыл бы символическую ссылку в переданном пути.
         self.project_dir = Path(os.path.abspath(project_dir))
-        self.report_path = Path(os.path.abspath(report_path))
+        self.report_path = Path(os.path.abspath(report_path)) if report_path is not None else None
         self.max_file_bytes = max_file_bytes
         self.project_mode = project_mode
         self._read_limit = min(max_file_bytes, 65536) if project_mode else max_file_bytes
@@ -174,34 +177,67 @@ class FileTools:
                     },
                 },
             })
+            definitions.append({
+                "type": "function",
+                "function": {
+                    "name": "search_text",
+                    "description": (
+                        "Найти точную подстроку с учётом регистра в файле или подкаталоге. "
+                        "Возвращает пути и номера строк. Для цитаты прочитайте найденную "
+                        "строку через read_file. При truncated=true охват неполный."
+                    ),
+                    "strict": False,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "minLength": 1, "maxLength": 256,
+                                      "description": "Однострочный текст для буквального поиска."},
+                            "path": {"type": "string", "description": "Файл, подкаталог или '.' (по умолчанию)."},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": self._MAX_MATCHES,
+                                      "default": 10},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            })
+        if self.report_path is None:
+            return [item for item in definitions if item["function"]["name"] != "save_report"]
         return definitions
 
     def execute(self, name: str, arguments: dict) -> dict:
-        allowed = {"read_file", "save_report"}
+        allowed = {"read_file"}
+        if self.report_path is not None:
+            allowed.add("save_report")
         if self.project_mode:
-            allowed.add("list_files")
+            allowed.update(("list_files", "search_text"))
         if not isinstance(name, str) or name not in allowed:
             return {"ok": False, "error": "Неизвестный инструмент."}
         if not isinstance(arguments, dict):
             return {"ok": False, "error": "Неверный набор аргументов инструмента."}
-        required = {"save_report": {"content"}, "read_file": {"path"}, "list_files": set()}[name]
+        required = {"save_report": {"content"}, "read_file": {"path"},
+                    "search_text": {"query"}, "list_files": set()}[name]
         optional: set[str] = set()
         if self.project_mode:
             optional = {"read_file": {"start_line", "max_lines"},
-                        "list_files": {"path", "offset", "limit"}, "save_report": set()}[name]
+                        "list_files": {"path", "offset", "limit"}, "search_text": {"path", "limit"},
+                        "save_report": set()}[name]
         if not required <= set(arguments) or set(arguments) - required - optional:
             return {"ok": False, "error": "Неверный набор аргументов инструмента."}
-        for key in ("path", "content"):
+        for key in ("path", "content", "query"):
             if key in arguments and not isinstance(arguments[key], str):
                 return {"ok": False, "error": "Аргумент инструмента должен быть строкой."}
+        max_limit = self._MAX_MATCHES if name == "search_text" else self._MAX_ENTRIES
         for key, minimum, maximum in (("start_line", 1, None), ("max_lines", 1, 500),
-                                       ("offset", 0, None), ("limit", 1, self._MAX_ENTRIES)):
+                                       ("offset", 0, None), ("limit", 1, max_limit)):
             if key in arguments and (type(arguments[key]) is not int
                                      or arguments[key] < minimum
                                      or maximum is not None and arguments[key] > maximum):
                 return {"ok": False, "error": f"Недопустимый числовой аргумент {key}."}
 
         try:
+            if name == "search_text":
+                return self._search_text(**arguments)
             if name == "list_files":
                 return self._list_files(**arguments)
             if name == "read_file":
@@ -294,7 +330,7 @@ class FileTools:
             if is_hidden(info) and not hidden_name_allowed(part, stat.S_ISDIR(info.st_mode)):
                 raise _ToolError("Скрытые файлы и папки исключены из анализа проекта.")
 
-    def _list_files(self, path: str = ".", offset: int = 0, limit: int = 100) -> dict:
+    def _scan_files(self, path: str) -> tuple[list[dict], int, bool]:
         self._check_components(self.project_dir)
         if not self.project_dir.is_dir():
             raise _ToolError("Путь проекта должен быть обычной папкой.")
@@ -371,6 +407,10 @@ class FileTools:
         if pending:
             truncated = True
         files.sort(key=lambda item: (item["path"].casefold(), item["path"]))
+        return files, scanned, truncated
+
+    def _list_files(self, path: str = ".", offset: int = 0, limit: int = 100) -> dict:
+        files, scanned, truncated = self._scan_files(path)
         page = files[offset:offset + limit]
         next_offset = offset + len(page) if offset + len(page) < len(files) else None
         self._project_listed = True
@@ -383,8 +423,57 @@ class FileTools:
             "remaining_read_bytes": self.remaining_read_bytes,
         }
 
-    def _read_file(self, path: str, start_line: int = 1, max_lines: int = 200) -> dict:
-        path = self._input_path(path)
+    def _search_text(self, query: str, path: str = ".", limit: int = 10) -> dict:
+        if not query.strip() or len(query) > 256 or "\r" in query or "\n" in query:
+            raise _ToolError("Для поиска нужна непустая фраза в одну строку, до 256 символов.")
+        start = self._relative_path(path, allow_root=True)
+        self._check_components(start)
+        directory = start.is_dir()
+        if directory:
+            candidates, _, truncated = self._scan_files(path)
+        else:
+            target = self._input_path(path)
+            candidates = [{"path": target.relative_to(self.project_dir).as_posix(),
+                           "bytes": target.lstat().st_size}]
+            truncated = False
+
+        matches = []
+        searched = skipped = 0
+        remaining = self._MAX_SEARCH_BYTES
+        for candidate in candidates:
+            size = candidate["bytes"]
+            if searched + skipped >= self._MAX_SEARCH_FILES:
+                truncated = True
+                break
+            if size > remaining and directory:
+                skipped += 1
+                continue
+            try:
+                target = self._input_path(candidate["path"])
+                # Reserve the listed size even when decoding fails. If a file grows
+                # between listing and opening, the bounded read rejects it.
+                if size > self._source_limit:
+                    raise _ToolError("Файл превышает допустимый размер.")
+                remaining -= size
+                content = self._source_text(target, size)
+            except (OSError, _ToolError):
+                if not directory:
+                    raise
+                skipped += 1
+                continue
+            searched += 1
+            for line_number, line in enumerate(StringIO(content, newline=""), start=1):
+                if query in line:
+                    matches.append({"path": candidate["path"], "line": line_number})
+                    if len(matches) > limit:
+                        break
+            if len(matches) > limit:
+                truncated = True
+                break
+        return {"ok": True, "matches": matches[:limit], "files_searched": searched,
+                "files_skipped": skipped, "truncated": truncated or skipped > 0}
+
+    def _source_text(self, path: Path, byte_limit: int) -> str:
         self._check_components(self.project_dir)
         if not self.project_dir.is_dir():
             raise _ToolError("Путь проекта должен быть обычной папкой.")
@@ -397,18 +486,22 @@ class FileTools:
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as source:
             self._check_readable_file(os.fstat(source.fileno()))
-            content = source.read(self._source_limit + 1)
-        if len(content) > self._source_limit:
+            content = source.read(byte_limit + 1)
+        if len(content) > byte_limit:
             raise _ToolError("Файл превышает допустимый размер.")
         if self.project_mode:
             try:
-                decoded = decode_text(content)
+                return decode_text(content)
             except ValueError as error:
                 raise _ToolError(str(error)) from None
+        return content.decode("utf-8")
+
+    def _read_file(self, path: str, start_line: int = 1, max_lines: int = 200) -> dict:
+        path = self._input_path(path)
+        decoded = self._source_text(path, self._source_limit)
+        if self.project_mode:
             decoded, end_line, total_lines = self._fragment(decoded, start_line, max_lines)
             self._remaining_read_bytes -= len(decoded.encode("utf-8"))
-        else:
-            decoded = content.decode("utf-8")
         self._successful_reads.add(path)
         result = {
             "ok": True,
@@ -426,9 +519,7 @@ class FileTools:
 
     def _fragment(self, text: str, start_line: int, max_lines: int) -> tuple[str, int, int]:
         # Нумерация соответствует LF/CRLF/CR, а не разрывам страницы или U+2028.
-        lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", text)
-        if lines and lines[-1] == "":
-            lines.pop()
+        lines = list(StringIO(text, newline=""))
         if start_line > len(lines) and not (not lines and start_line == 1):
             raise _ToolError("Начальная строка находится за пределами файла.")
         capacity = min(self._read_limit, self.remaining_read_bytes)

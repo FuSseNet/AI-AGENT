@@ -28,7 +28,8 @@ class IntegrationTests(unittest.TestCase):
             script = [
                 ("list", "list_files", {"path": ".", "limit": 10}),
                 ("manifest", "read_file", {"path": "pom.xml"}),
-                ("source", "read_file", {"path": "src/App.java", "start_line": 2, "max_lines": 1}),
+                ("find", "search_text", {"query": "int count"}),
+                ("source", "read_file", {}),
                 ("save", "save_report", {"content": "Java-проект; изучена только одна строка исходника."}),
             ]
             responses = 0
@@ -44,6 +45,10 @@ class IntegrationTests(unittest.TestCase):
                     if index == 1:
                         self.assertEqual(previous["remaining_read_bytes"], 128)
                     if index == 3:
+                        self.assertEqual(previous["matches"], [{"path": "src/App.java", "line": 2}])
+                        hit = previous["matches"][0]
+                        script[index][2].update(path=hit["path"], start_line=hit["line"], max_lines=1)
+                    if index == 4:
                         self.assertEqual(previous["content"], "  int count = 1;\n")
                         self.assertEqual(previous["next_line"], 3)
                 if index == len(script):
@@ -64,6 +69,9 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             report = next(root.glob("workspace/reports/*/report.md")).read_text(encoding="utf-8")
             self.assertIn("`src/App.java`: строки 2–2", report)
+            log = next(root.glob("runs/*.jsonl")).read_text(encoding="utf-8")
+            self.assertIn('"tool": "search_text"', log)
+            self.assertNotIn("int count", log)
             self.assertEqual(source.read_text(encoding="utf-8"), "class App {\n  int count = 1;\n}\n")
 
     def test_project_review_lists_reads_source_and_saves_without_modifying_project(self):
